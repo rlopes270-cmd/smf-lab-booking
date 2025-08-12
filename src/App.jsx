@@ -1,10 +1,14 @@
-// SMF Lab Booking — v3.2 (fixed)
-// - Fix: correct range highlight includes start day
-// - Fix: conflict check against other tests and internal blocks
-// - Stable single-file React component (Tailwind + framer-motion)
+// SMF Lab Booking — v3.3 (M1)
+// - Calendar: fix range highlight includes start day (TZ-safe)
+// - Calendar: weekend darker + FR holidays marked "Closed"
+// - Calendar: event labels bigger, "CODE — Title" (title emphasized)
+// - Dashboard: clearer date badge + "Reset dates" action
+// - Sorting: apply only on "Refresh" click (no auto resort)
 
 import React, { useEffect, useMemo, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
+import { getFrenchHolidaySet } from "./utils/holidaysFR";
+import { parseYMD, fmtISO } from "./utils/dateSafe";
 
 // ---------- UI color helpers ----------
 const C = {
@@ -17,7 +21,7 @@ const C = {
 // ---------- i18n ----------
 const T = {
   en: {
-    title: "SMF Test Facility Scheduler (v3.2)",
+    title: "SMF Test Facility Scheduler (v3.3)",
     nav: { dash: "Dashboard", cal: "Calendar", ana: "Analytics", arc: "Archive", adm: "Admin" },
     lang: "Language",
     role: "Role",
@@ -67,7 +71,7 @@ const T = {
     conflict: "Conflict: dates overlap with other tests or blocks",
   },
   it: {
-    title: "Scheduler SMF Test Facility (v3.2)",
+    title: "Scheduler SMF Test Facility (v3.3)",
     nav: { dash: "Dashboard", cal: "Calendario", ana: "Analytics", arc: "Archivio", adm: "Admin" },
     lang: "Lingua",
     role: "Ruolo",
@@ -135,12 +139,9 @@ const add = (d, n) => {
   x.setDate(x.getDate() + n);
   return x;
 };
-const fmt = (d) => (d ? new Date(d).toISOString().slice(0, 10) : "");
+const fmt = (d) => (d ? fmtISO(new Date(d)) : "");
 const days = (a, b) =>
-  Math.max(
-    0,
-    Math.round((new Date(b).setHours(0, 0, 0, 0) - new Date(a).setHours(0, 0, 0, 0)) / (1000 * 60 * 60 * 24)) + 1
-  );
+  Math.max(0, Math.round((new Date(b).setHours(0, 0, 0, 0) - new Date(a).setHours(0, 0, 0, 0)) / (1000 * 60 * 60 * 24)) + 1);
 
 // ---------- sample data ----------
 const U = [
@@ -190,7 +191,7 @@ const D = [
       TEST_REPORT: "NOT_SUBMITTED",
     },
     dates: { start: add(today, 18), end: add(today, 18) },
-    ops: ["Oscar Operator"],
+    ops: ["Olivia Operator"],
   },
   {
     id: "T-003",
@@ -223,20 +224,13 @@ const BL = [
 // ---------- helpers ----------
 const cStep = (k, v, setup) => {
   switch (k) {
-    case "REQUEST_VALIDATION":
-      return v === "DONE" ? C.n : C.g;
-    case "CONTRACT_REVIEW":
-      return v === "APPROVED" ? C.n : v === "REJECTED" ? C.r : v === "UNDER_REVIEW" ? C.y : C.g;
-    case "PRE":
-      return ["NO", "NA", "APPROVED"].includes(v) ? C.n : v === "UNDER_REVIEW" ? C.y : C.g;
-    case "TEST_SETUP":
-      return v === "COMPLETED" ? C.n : v === "STARTED" ? C.y : C.g;
-    case "SCHEDULING":
-      return !setup ? C.y : v === "PLANNED" ? C.n : C.g;
-    case "TEST_REPORT":
-      return v === "APPROVED" ? C.n : v === "UNDER_REVIEW" ? C.y : C.g;
-    default:
-      return C.g;
+    case "REQUEST_VALIDATION": return v === "DONE" ? C.n : C.g;
+    case "CONTRACT_REVIEW": return v === "APPROVED" ? C.n : v === "REJECTED" ? C.r : v === "UNDER_REVIEW" ? C.y : C.g;
+    case "PRE": return ["NO", "NA", "APPROVED"].includes(v) ? C.n : v === "UNDER_REVIEW" ? C.y : C.g;
+    case "TEST_SETUP": return v === "COMPLETED" ? C.n : v === "STARTED" ? C.y : C.g;
+    case "SCHEDULING": return !setup ? C.y : v === "PLANNED" ? C.n : C.g;
+    case "TEST_REPORT": return v === "APPROVED" ? C.n : v === "UNDER_REVIEW" ? C.y : C.g;
+    default: return C.g;
   }
 };
 
@@ -276,10 +270,18 @@ export default function App() {
   const [q, setQ] = useState("");
   const [mine, setMine] = useState(false);
   const [crOk, setCrOk] = useState(false);
-  const [sort, setSort] = useState("d");
+
+  // NEW: selected vs applied sort + manual refresh
+  const [sortSel, setSortSel] = useState("d");
+  const [sortApplied, setSortApplied] = useState("d");
+  const [refreshTick, setRefreshTick] = useState(0);
+
   const [m, setM] = useState(new Date());
   const [tour, setTour] = useState(false);
   const [step, setStep] = useState(0);
+
+  // FR holidays (this year + next), used by Calendar
+  const holidaysFR = useMemo(() => getFrenchHolidaySet(), []);
 
   const ongoing = useMemo(() => tests.filter((x) => !x.ar), [tests]);
   const archived = useMemo(() => tests.filter((x) => x.ar), [tests]);
@@ -293,16 +295,11 @@ export default function App() {
       return mt && mi && cr;
     });
     arr = arr.slice();
+    const sort = sortApplied;
     if (sort === "d") {
       arr.sort((a, b) => {
-        const at =
-          a.steps.TEST_SETUP === "COMPLETED" && a.steps.SCHEDULING === "PLANNED" && a.dates?.start
-            ? new Date(a.dates.start).getTime()
-            : Infinity;
-        const bt =
-          b.steps.TEST_SETUP === "COMPLETED" && b.steps.SCHEDULING === "PLANNED" && b.dates?.start
-            ? new Date(b.dates.start).getTime()
-            : Infinity;
+        const at = a.steps.TEST_SETUP === "COMPLETED" && a.steps.SCHEDULING === "PLANNED" && a.dates?.start ? new Date(a.dates.start).getTime() : Infinity;
+        const bt = b.steps.TEST_SETUP === "COMPLETED" && b.steps.SCHEDULING === "PLANNED" && b.dates?.start ? new Date(b.dates.start).getTime() : Infinity;
         return at - bt;
       });
     } else if (sort === "p") {
@@ -311,7 +308,7 @@ export default function App() {
       arr.sort((a, b) => String(a.name).localeCompare(String(b.name)));
     }
     return arr;
-  }, [ongoing, q, mine, crOk, sort]);
+  }, [ongoing, q, mine, crOk, sortApplied, refreshTick]);
 
   const kpi = useMemo(() => {
     const planned = ongoing.filter((t) => t.steps.SCHEDULING === "PLANNED" && t.steps.TEST_SETUP === "COMPLETED");
@@ -334,13 +331,28 @@ export default function App() {
 
   function setDates(id, s, e) {
     if (!(role === "Admin" || role === "SuperAdmin")) return;
+    const S = parseYMD(s);
+    const E = parseYMD(e);
     setTests((p) =>
       p.map((t) => {
         if (t.id !== id) return t;
         const setup = t.steps.TEST_SETUP === "COMPLETED";
         const steps = { ...t.steps };
-        if (setup && s && e) steps.SCHEDULING = "PLANNED";
-        return { ...t, dates: { start: new Date(s), end: new Date(e) }, steps };
+        if (setup && S && E) steps.SCHEDULING = "PLANNED";
+        return { ...t, dates: { start: S, end: E }, steps };
+      })
+    );
+  }
+
+  // NEW: reset dates
+  function resetDates(id) {
+    if (!(role === "Admin" || role === "SuperAdmin")) return;
+    setTests((p) =>
+      p.map((t) => {
+        if (t.id !== id) return t;
+        const steps = { ...t.steps };
+        steps.SCHEDULING = "ON_HOLD";
+        return { ...t, dates: { start: null, end: null }, steps };
       })
     );
   }
@@ -354,12 +366,12 @@ export default function App() {
     setTests((p) => p.map((t) => (t.id === id ? { ...t, ar: false, st: "Ongoing" } : t)));
   }
   function addBlock(tp) {
-    if (role !== "Admin" && role !== "SuperAdmin") return;
+    if (role !== "Admin" && role !== "SuperAdmin")) return;
     const title = prompt(`${t.cal.type}: ${tp}`) || tp;
     const s = prompt("Start (YYYY-MM-DD)", fmt(add(new Date(), 3)));
     const e = prompt("End (YYYY-MM-DD)", fmt(add(new Date(), 3)));
     if (!s || !e) return;
-    setBlocks((p) => p.concat({ id: "B-" + (p.length + 1), t: tp, title, s: new Date(s), e: new Date(e) }));
+    setBlocks((p) => p.concat({ id: "B-" + (p.length + 1), t: tp, title, s: parseYMD(s), e: parseYMD(e) }));
   }
 
   return (
@@ -381,7 +393,18 @@ export default function App() {
               { l: T[lang].roles.vw, v: "Viewer" },
             ]}
           />
-          <Tabs id="tabs" items={[{ k: "dashboard", l: t.nav.dash }, { k: "calendar", l: t.nav.cal }, { k: "analytics", l: t.nav.ana }, { k: "archive", l: t.nav.arc }, { k: "admin", l: t.nav.adm }]} act={tab} on={setTab} />
+          <Tabs
+            id="tabs"
+            items={[
+              { k: "dashboard", l: t.nav.dash },
+              { k: "calendar", l: t.nav.cal },
+              { k: "analytics", l: t.nav.ana },
+              { k: "archive", l: t.nav.arc },
+              { k: "admin", l: t.nav.adm },
+            ]}
+            act={tab}
+            on={setTab}
+          />
           <button onClick={() => { setTour(true); setStep(0); }} className="ml-2 px-3 py-2 rounded-xl bg-slate-900 text-white text-sm">
             {T[lang].tour.start}
           </button>
@@ -389,9 +412,30 @@ export default function App() {
       </div>
 
       {tab === "dashboard" && (
-        <Dash lang={lang} role={role} list={list} all={tests} k={kpi} q={q} setQ={setQ} mine={mine} setMine={setMine} crOk={crOk} setCrOk={setCrOk} sort={sort} setSort={setSort} updStep={updStep} closeArc={closeArc} reopen={reopen} setDates={setDates} blocks={blocks} />
+        <Dash
+          lang={lang}
+          role={role}
+          list={list}
+          all={tests}
+          k={kpi}
+          q={q}
+          setQ={setQ}
+          mine={mine}
+          setMine={setMine}
+          crOk={crOk}
+          setCrOk={setCrOk}
+          sortSel={sortSel}
+          setSortSel={setSortSel}
+          applySort={() => { setSortApplied(sortSel); setRefreshTick(v => v + 1); }}
+          updStep={updStep}
+          closeArc={closeArc}
+          reopen={reopen}
+          setDates={setDates}
+          resetDates={resetDates}
+          blocks={blocks}
+        />
       )}
-      {tab === "calendar" && <Cal lang={lang} role={role} m={m} setM={setM} tests={ongoing} blocks={blocks} addBlock={addBlock} />}
+      {tab === "calendar" && <Cal lang={lang} role={role} m={m} setM={setM} tests={ongoing} blocks={blocks} addBlock={addBlock} holidaysFR={holidaysFR} />}
       {tab === "analytics" && <Ana lang={lang} tests={tests} />}
       {tab === "archive" && <Arc lang={lang} role={role} tests={archived} reopen={reopen} />}
       {tab === "admin" && <Adm lang={lang} role={role} users={U} blocks={blocks} addBlock={addBlock} />}
@@ -402,8 +446,7 @@ export default function App() {
 }
 
 function prog(t) {
-  const s = t.steps,
-    c = ST.map((k) => cStep(k, s[k], s.TEST_SETUP === "COMPLETED"));
+  const s = t.steps, c = ST.map((k) => cStep(k, s[k], s.TEST_SETUP === "COMPLETED"));
   return Math.round((c.filter((x) => x.includes("green")).length / ST.length) * 100);
 }
 
@@ -435,9 +478,7 @@ function Sel({ id, lab, val, on, opts }) {
       <span className="text-slate-600">{lab}</span>
       <select value={val} onChange={(e) => on(e.target.value)} className="px-2 py-2 rounded-xl bg-white shadow-sm border border-slate-200">
         {opts.map((o) => (
-          <option key={o.v} value={o.v}>
-            {o.l}
-          </option>
+          <option key={o.v} value={o.v}>{o.l}</option>
         ))}
       </select>
     </div>
@@ -456,7 +497,7 @@ function Tabs({ id, items, act, on }) {
   );
 }
 
-function Dash({ lang, role, list, all, k, q, setQ, mine, setMine, crOk, setCrOk, sort, setSort, updStep, closeArc, reopen, setDates, blocks }) {
+function Dash({ lang, role, list, all, k, q, setQ, mine, setMine, crOk, setCrOk, sortSel, setSortSel, applySort, updStep, closeArc, reopen, setDates, resetDates, blocks }) {
   const tt = T[lang];
   return (
     <div>
@@ -471,19 +512,32 @@ function Dash({ lang, role, list, all, k, q, setQ, mine, setMine, crOk, setCrOk,
         <Srch v={q} on={setQ} ph={tt.search} />
         <Tog lab={tt.flt.mine} chk={mine} on={setMine} />
         <Tog lab={tt.flt.cr} chk={crOk} on={setCrOk} />
-        <Sel lab={tt.sort.lbl} val={sort} on={setSort} opts={[{ l: tt.sort.d, v: "d" }, { l: tt.sort.p, v: "p" }, { l: tt.sort.n, v: "n" }]} />
+        <Sel lab={tt.sort.lbl} val={sortSel} on={setSortSel} opts={[{ l: tt.sort.d, v: "d" }, { l: tt.sort.p, v: "p" }, { l: tt.sort.n, v: "n" }]} />
+        <button onClick={applySort} className="px-3 py-2 rounded-xl bg-slate-900 text-white text-sm">Refresh</button>
       </div>
 
       <div id="testlist" className="space-y-3">
         {list.map((t) => (
-          <Row key={t.id} lang={lang} t={t} role={role} updStep={updStep} closeArc={() => closeArc(t.id)} reopen={() => reopen(t.id)} setDates={(s, e) => setDates(t.id, s, e)} all={all} blocks={blocks} />
+          <Row
+            key={t.id}
+            lang={lang}
+            t={t}
+            role={role}
+            updStep={updStep}
+            closeArc={() => closeArc(t.id)}
+            reopen={() => reopen(t.id)}
+            setDates={(s, e) => setDates(t.id, s, e)}
+            resetDates={() => resetDates(t.id)}
+            all={all}
+            blocks={blocks}
+          />
         )) || <div className="text-slate-500 italic">No data</div>}
       </div>
     </div>
   );
 }
 
-function Row({ lang, t, role, updStep, closeArc, reopen, setDates, all, blocks }) {
+function Row({ lang, t, role, updStep, closeArc, reopen, setDates, resetDates, all, blocks }) {
   const lab = L(lang),
     setup = t.steps.TEST_SETUP === "COMPLETED",
     p = prog(t),
@@ -518,7 +572,9 @@ function Row({ lang, t, role, updStep, closeArc, reopen, setDates, all, blocks }
           </div>
           {t.ops?.length > 0 && <div className="text-xs text-slate-600 mt-1">{T[lang].test.ops}: {t.ops.join(", ")}</div>}
         </div>
-        <div className="text-xs text-slate-500">{fmt(t.dates?.start)} → {fmt(t.dates?.end)}</div>
+        <div className="text-sm font-medium text-slate-700 bg-slate-100 px-2 py-1 rounded-lg">
+          {fmt(t.dates?.start)} → {fmt(t.dates?.end)}
+        </div>
       </div>
 
       <div className="mt-3 grid md:grid-cols-6 gap-2">
@@ -532,11 +588,7 @@ function Row({ lang, t, role, updStep, closeArc, reopen, setDates, all, blocks }
               <div className="text-xs">
                 {k !== "SCHEDULING" ? (
                   <select className="mt-1 w-full border border-slate-200 rounded-lg text-xs p-1" value={t.steps[k]} onChange={(e) => updStep(t.id, k, e.target.value)}>
-                    {defs[k].map((o) => (
-                      <option key={o} value={o}>
-                        {o}
-                      </option>
-                    ))}
+                    {defs[k].map((o) => (<option key={o} value={o}>{o}</option>))}
                   </select>
                 ) : (
                   <div className="text-[10px] italic text-slate-500">
@@ -556,23 +608,18 @@ function Row({ lang, t, role, updStep, closeArc, reopen, setDates, all, blocks }
       <div className="mt-3 flex flex-wrap items-center gap-2 text-sm">
         {(role === "Admin" || role === "SuperAdmin") && (
           <>
-            <button onClick={() => setDOpen(true)} className="px-3 py-1 rounded-xl bg-slate-900 text-white">
-              🗓 {T[lang].test.sd}
-            </button>
-            <button onClick={() => setOOpen(true)} className="px-3 py-1 rounded-xl bg-blue-200 text-blue-900">
-              👥 {T[lang].test.assign}
-            </button>
+            <button onClick={() => setDOpen(true)} className="px-3 py-1 rounded-xl bg-slate-900 text-white">🗓 {T[lang].test.sd}</button>
+            <button onClick={resetDates} className="px-3 py-1 rounded-xl bg-slate-100 text-slate-700 border border-slate-200" title={lang === "en" ? "Clear scheduled dates" : "Rimuovi le date programmate"}>⟳ Reset dates</button>
+            <button onClick={() => setOOpen(true)} className="px-3 py-1 rounded-xl bg-blue-200 text-blue-900">👥 {T[lang].test.assign}</button>
           </>
         )}
         {t.ar ? (
           <button onClick={reopen} disabled={role !== "SuperAdmin"} className={`px-3 py-1 rounded-xl ${role !== "SuperAdmin" ? "bg-slate-200 text-slate-500" : "bg-emerald-200 text-emerald-900"}`}>
-            {role !== "SuperAdmin" ? "(Super Admin) " : ""}
-            {T[lang].test.reopen}
+            {role !== "SuperAdmin" ? "(Super Admin) " : ""}{T[lang].test.reopen}
           </button>
         ) : (
           <button onClick={closeArc} disabled={!(role === "Admin" || role === "SuperAdmin")} className={`px-3 py-1 rounded-xl ${!(role === "Admin" || role === "SuperAdmin") ? "bg-slate-200 text-slate-500" : "bg-red-200 text-red-900"}`}>
-            {!(role === "Admin" || role === "SuperAdmin") ? "(Admin) " : ""}
-            {T[lang].test.close}
+            {!(role === "Admin" || role === "SuperAdmin") ? "(Admin) " : ""}{T[lang].test.close}
           </button>
         )}
       </div>
@@ -596,59 +643,40 @@ function DateModal({ lang, t, onClose, onSave, all, blocks, avail }) {
   const [e, setE] = useState(t.dates?.end ? fmt(t.dates.end) : "");
   const cells = useMemo(() => grid(mm), [mm]);
 
-  // a day is disabled if overlaps any planned test (excluding this one) or a block
   const dis = (d) =>
     all.some((o) => o.id !== t.id && !o.ar && o.steps.SCHEDULING === "PLANNED" && over(d, d, o.dates?.start, o.dates?.end)) ||
     blocks.some((b) => over(d, d, b.s, b.e));
 
-  // FIX: include start day in highlight and allow selecting backwards
+  // Inclusive start, TZ-safe, backward selection supported
   const pick = (d) => {
-    const ds = fmt(d);
-    if (!s) {
-      setS(ds);
-      setE(ds);
-      return;
-    }
-    const sd = new Date(s);
-    if (d < sd) {
-      setS(ds);
-      setE(s);
-      return;
-    }
+    const ds = fmtISO(d);
+    if (!s) { setS(ds); setE(ds); return; }
+    const sd = parseYMD(s);
+    if (d < sd) { setS(ds); setE(s); return; }
     setE(ds);
   };
 
-  const ok = s && e && avail(new Date(s), new Date(e));
+  const ok = s && e && avail(parseYMD(s), parseYMD(e));
 
   return (
     <motion.div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
       <motion.div className="bg-white rounded-2xl shadow-xl p-4 w-[92%] max-w-2xl" initial={{ scale: 0.95, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.95, opacity: 0 }}>
-        <div className="font-semibold mb-2">
-          {tt.test.sd} — {t.id}
-        </div>
+        <div className="font-semibold mb-2">{tt.test.sd} — {t.id}</div>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
           <div className="p-2 rounded-xl border border-slate-200">
             <div className="flex items-center justify-between mb-2">
-              <button className="px-2 py-1 rounded bg-slate-100" onClick={() => setMM(new Date(mm.getFullYear(), mm.getMonth() - 1, 1))}>
-                ←
-              </button>
+              <button className="px-2 py-1 rounded bg-slate-100" onClick={() => setMM(new Date(mm.getFullYear(), mm.getMonth() - 1, 1))}>←</button>
               <div className="text-sm font-semibold">{mm.toLocaleString(lang === "en" ? "en-GB" : "it-IT", { month: "long", year: "numeric" })}</div>
-              <button className="px-2 py-1 rounded bg-slate-100" onClick={() => setMM(new Date(mm.getFullYear(), mm.getMonth() + 1, 1))}>
-                →
-              </button>
+              <button className="px-2 py-1 rounded bg-slate-100" onClick={() => setMM(new Date(mm.getFullYear(), mm.getMonth() + 1, 1))}>→</button>
             </div>
             <div className="grid grid-cols-7 gap-1 text-[11px] text-slate-500 mb-1">
-              {"Mon Tue Wed Thu Fri Sat Sun".split(" ").map((d) => (
-                <div key={d} className="text-center">
-                  {d}
-                </div>
-              ))}
+              {"Mon Tue Wed Thu Fri Sat Sun".split(" ").map((d) => (<div key={d} className="text-center">{d}</div>))}
             </div>
             <div className="grid grid-cols-7 gap-1">
               {cells.map((d, i) => {
                 const inM = d.getMonth() === mm.getMonth();
                 const disd = dis(d);
-                const sel = s && e && d >= new Date(s) && d <= new Date(e); // inclusive
+                const sel = s && e && d >= parseYMD(s) && d <= parseYMD(e);
                 return (
                   <button key={i} disabled={!inM || disd} onClick={() => pick(d)} className={`h-9 rounded text-[11px] border ${sel ? "bg-emerald-200 border-emerald-300" : disd ? "bg-slate-100 text-slate-400 border-slate-100" : "bg-white hover:bg-slate-50 border-slate-200"}`}>
                     {d.getDate()}
@@ -670,15 +698,12 @@ function DateModal({ lang, t, onClose, onSave, all, blocks, avail }) {
             </label>
           </div>
         </div>
+
         <div className="mt-3 flex justify-between items-center">
           {!ok && s && e && <div className="text-xs text-red-600">{T[lang].conflict}</div>}
           <div className="flex gap-2 ml-auto">
-            <button onClick={onClose} className="px-3 py-2 rounded-xl bg-slate-100">
-              {tt.test.cancel}
-            </button>
-            <button onClick={() => onSave(s, e)} disabled={!ok} className={`px-3 py-2 rounded-xl ${!ok ? "bg-slate-200 text-slate-500" : "bg-slate-900 text-white"}`}>
-              {tt.test.save}
-            </button>
+            <button onClick={onClose} className="px-3 py-2 rounded-xl bg-slate-100">{tt.test.cancel}</button>
+            <button onClick={() => onSave(s, e)} disabled={!ok} className={`px-3 py-2 rounded-xl ${!ok ? "bg-slate-200 text-slate-500" : "bg-slate-900 text-white"}`}>{tt.test.save}</button>
           </div>
         </div>
       </motion.div>
@@ -695,9 +720,7 @@ function OpsModal({ lang, t, onClose, onSave }) {
   return (
     <motion.div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
       <motion.div className="bg-white rounded-2xl shadow-xl p-4 w-[92%] max-w-md" initial={{ scale: 0.95, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.95, opacity: 0 }}>
-        <div className="font-semibold mb-2">
-          {T[lang].test.assign} — {t.id}
-        </div>
+        <div className="font-semibold mb-2">{T[lang].test.assign} — {t.id}</div>
         <div className="space-y-2">
           {ops.map((o) => (
             <label key={o.id} className="flex items-center gap-2 text-sm">
@@ -709,12 +732,8 @@ function OpsModal({ lang, t, onClose, onSave }) {
           <input value={extra} onChange={(e) => setExtra(e.target.value)} placeholder={lang === "en" ? "Full name" : "Nome e cognome"} className="w-full border border-slate-200 rounded-lg p-2" />
         </div>
         <div className="mt-3 flex justify-end gap-2">
-          <button onClick={onClose} className="px-3 py-2 rounded-xl bg-slate-100">
-            {T[lang].test.cancel}
-          </button>
-          <button onClick={() => { const fin = extra.trim() ? Array.from(new Set(sel.concat(extra.trim()))) : sel; onSave(fin); }} className="px-3 py-2 rounded-xl bg-slate-900 text-white">
-            {T[lang].test.save}
-          </button>
+          <button onClick={onClose} className="px-3 py-2 rounded-xl bg-slate-100">{T[lang].test.cancel}</button>
+          <button onClick={() => { const fin = extra.trim() ? Array.from(new Set(sel.concat(extra.trim()))) : sel; onSave(fin); }} className="px-3 py-2 rounded-xl bg-slate-900 text-white">{T[lang].test.save}</button>
         </div>
       </motion.div>
     </motion.div>
@@ -724,10 +743,7 @@ function OpsModal({ lang, t, onClose, onSave }) {
 function Ana({ lang, tests }) {
   const by = (f) => {
     const m = new Map();
-    tests.forEach((x) => {
-      const k = f(x) || "-";
-      m.set(k, (m.get(k) || 0) + 1);
-    });
+    tests.forEach((x) => { const k = f(x) || "-"; m.set(k, (m.get(k) || 0) + 1); });
     return [...m.entries()].sort((a, b) => b[1] - a[1]);
   };
   const c = by((x) => x.rq);
@@ -737,23 +753,13 @@ function Ana({ lang, tests }) {
       <div className="p-3 rounded-2xl bg-white shadow-sm">
         <h3 className="font-semibold mb-2">{T[lang].ana.byC}</h3>
         <ul className="space-y-1 text-sm">
-          {c.map(([k, v]) => (
-            <li key={k} className="flex justify-between">
-              <span>{k}</span>
-              <span className="text-slate-500">{v}</span>
-            </li>
-          ))}
+          {c.map(([k, v]) => (<li key={k} className="flex justify-between"><span>{k}</span><span className="text-slate-500">{v}</span></li>))}
         </ul>
       </div>
       <div className="p-3 rounded-2xl bg-white shadow-sm">
         <h3 className="font-semibold mb-2">{T[lang].ana.byD}</h3>
         <ul className="space-y-1 text-sm">
-          {d.map(([k, v]) => (
-            <li key={k} className="flex justify-between">
-              <span>{k}</span>
-              <span className="text-slate-500">{v}</span>
-            </li>
-          ))}
+          {d.map(([k, v]) => (<li key={k} className="flex justify-between"><span>{k}</span><span className="text-slate-500">{v}</span></li>))}
         </ul>
       </div>
     </div>
@@ -765,16 +771,11 @@ function Arc({ lang, role, tests, reopen }) {
     <div className="mt-2">
       {tests.map((t) => (
         <div key={t.id} className="p-4 rounded-2xl bg-white shadow-sm mb-3">
-          <div className="font-semibold">
-            {t.name} <span className="text-slate-400">({t.id})</span>
-          </div>
-          <div className="text-xs text-slate-500">
-            {t.rq} - PBS: {t.pbs}
-          </div>
+          <div className="font-semibold">{t.name} <span className="text-slate-400">({t.id})</span></div>
+          <div className="text-xs text-slate-500">{t.rq} - PBS: {t.pbs}</div>
           <div className="mt-2">
             <button onClick={() => reopen(t.id)} disabled={role !== "SuperAdmin"} className={`px-3 py-1 rounded-xl ${role !== "SuperAdmin" ? "bg-slate-200 text-slate-500" : "bg-emerald-200 text-emerald-900"}`}>
-              {role !== "SuperAdmin" ? "(Super Admin) " : ""}
-              {T[lang].test.reopen}
+              {role !== "SuperAdmin" ? "(Super Admin) " : ""}{T[lang].test.reopen}
             </button>
           </div>
         </div>
@@ -791,16 +792,10 @@ function Adm({ lang, role, users, blocks, addBlock }) {
         <ul className="space-y-2">
           {users.map((u) => (
             <li key={u.id} className="text-sm flex items-center justify-between">
-              <span>
-                {u.n} — {u.r}
-              </span>
+              <span>{u.n} — {u.r}</span>
               <div className="flex gap-2">
-                <button className={`px-2 py-1 rounded-lg ${role !== "SuperAdmin" ? "bg-slate-200 text-slate-400" : "bg-slate-900 text-white"}`} disabled={role !== "SuperAdmin"}>
-                  Make Admin
-                </button>
-                <button className={`px-2 py-1 rounded-lg ${role !== "SuperAdmin" ? "bg-slate-200 text-slate-400" : "bg-red-200 text-red-900"}`} disabled={role !== "SuperAdmin"}>
-                  Revoke Admin
-                </button>
+                <button className={`px-2 py-1 rounded-lg ${role !== "SuperAdmin" ? "bg-slate-200 text-slate-400" : "bg-slate-900 text-white"}`} disabled={role !== "SuperAdmin"}>Make Admin</button>
+                <button className={`px-2 py-1 rounded-lg ${role !== "SuperAdmin" ? "bg-slate-200 text-slate-400" : "bg-red-200 text-red-900"}`} disabled={role !== "SuperAdmin"}>Revoke Admin</button>
               </div>
             </li>
           ))}
@@ -811,9 +806,7 @@ function Adm({ lang, role, users, blocks, addBlock }) {
         <ul className="space-y-1 mb-2">
           {blocks.map((b) => (
             <li key={b.id} className="text-sm flex justify-between">
-              <span>
-                {b.title} — {b.t}
-              </span>
+              <span>{b.title} — {b.t}</span>
               <span className="text-slate-500">{fmt(b.s)} → {fmt(b.e)}</span>
             </li>
           ))}
@@ -821,15 +814,9 @@ function Adm({ lang, role, users, blocks, addBlock }) {
         {(role === "Admin" || role === "SuperAdmin") && (
           <div className="mt-2 flex flex-wrap items-center gap-2">
             <span className="text-sm font-semibold">{T[lang].cal.nb}:</span>
-            <button onClick={() => addBlock("m")} className="px-3 py-1 rounded-lg bg-amber-200">
-              {T[lang].cal.types.m}
-            </button>
-            <button onClick={() => addBlock("b")} className="px-3 py-1 rounded-lg bg-red-200">
-              {T[lang].cal.types.b}
-            </button>
-            <button onClick={() => addBlock("l")} className="px-3 py-1 rounded-lg bg-blue-200">
-              {T[lang].cal.types.l}
-            </button>
+            <button onClick={() => addBlock("m")} className="px-3 py-1 rounded-lg bg-amber-200">{T[lang].cal.types.m}</button>
+            <button onClick={() => addBlock("b")} className="px-3 py-1 rounded-lg bg-red-200">{T[lang].cal.types.b}</button>
+            <button onClick={() => addBlock("l")} className="px-3 py-1 rounded-lg bg-blue-200">{T[lang].cal.types.l}</button>
           </div>
         )}
       </div>
@@ -837,70 +824,68 @@ function Adm({ lang, role, users, blocks, addBlock }) {
   );
 }
 
-function Cal({ lang, role, m, setM, tests, blocks, addBlock }) {
+function Cal({ lang, role, m, setM, tests, blocks, addBlock, holidaysFR }) {
   const t = T[lang];
   const cells = useMemo(() => grid(m), [m]);
   const name = m.toLocaleString(lang === "en" ? "en-GB" : "it-IT", { month: "long", year: "numeric" });
 
   const onDay = (d) => {
     const sd = (a, b) => a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
-    const te = [],
-      be = [];
+    const te = [], be = [];
+    const iso = fmtISO(d);
+    const isHoliday = holidaysFR?.has?.(iso);
+
     tests.forEach((tt) => {
       if (!tt.dates?.start || !tt.dates?.end) return;
-      const s = new Date(tt.dates.start),
-        e = new Date(tt.dates.end),
-        c = new Date(s);
-      for (; c <= e; c.setDate(c.getDate() + 1)) if (sd(c, d)) {
-        te.push({ id: tt.id, t: tt.name });
-        break;
-      }
+      const s = new Date(tt.dates.start), e = new Date(tt.dates.end), c = new Date(s);
+      for (; c <= e; c.setDate(c.getDate() + 1)) if (sd(c, d)) { te.push({ id: tt.id, t: tt.name }); break; }
     });
     blocks.forEach((b) => {
-      const s = new Date(b.s),
-        e = new Date(b.e),
-        c = new Date(s);
-      for (; c <= e; c.setDate(c.getDate() + 1)) if (sd(c, d)) {
-        be.push({ id: b.id, t: b.title });
-        break;
-      }
+      const s = new Date(b.s), e = new Date(b.e), c = new Date(s);
+      for (; c <= e; c.setDate(c.getDate() + 1)) if (sd(c, d)) { be.push({ id: b.id, t: b.title }); break; }
     });
-    return { te, be };
+    return { te, be, isHoliday };
   };
 
   return (
     <div id="calendar" className="p-3 rounded-2xl bg-white shadow-sm">
       <div className="flex items-center justify-between mb-2">
-        <button className="px-3 py-1 rounded-xl bg-slate-100" onClick={() => setM(new Date(m.getFullYear(), m.getMonth() - 1, 1))}>
-          ←
-        </button>
+        <button className="px-3 py-1 rounded-xl bg-slate-100" onClick={() => setM(new Date(m.getFullYear(), m.getMonth() - 1, 1))}>←</button>
         <div className="font-semibold">{name}</div>
-        <button className="px-3 py-1 rounded-xl bg-slate-100" onClick={() => setM(new Date(m.getFullYear(), m.getMonth() + 1, 1))}>
-          →
-        </button>
+        <button className="px-3 py-1 rounded-xl bg-slate-100" onClick={() => setM(new Date(m.getFullYear(), m.getMonth() + 1, 1))}>→</button>
       </div>
       <div className="grid grid-cols-7 gap-2 text-xs mb-2 text-slate-500">
-        {"Mon Tue Wed Thu Fri Sat Sun".split(" ").map((d) => (
-          <div key={d} className="text-center">
-            {d}
-          </div>
-        ))}
+        {"Mon Tue Wed Thu Fri Sat Sun".split(" ").map((d) => (<div key={d} className="text-center">{d}</div>))}
       </div>
       <div className="grid grid-cols-7 gap-2">
         {cells.map((d, i) => {
           const inM = d.getMonth() === m.getMonth();
-          const { te, be } = onDay(d);
+          const { te, be, isHoliday } = onDay(d);
+          const dow = d.getDay(); // 0 Sun, 6 Sat
+          const isWeekend = dow === 0 || dow === 6;
           return (
-            <div key={i} className={`h-24 p-1 rounded-lg border ${inM ? "bg-slate-50 border-slate-200" : "bg-slate-100 border-slate-100 opacity-60"}`}>
-              <div className="text-[11px] text-right text-slate-500">{d.getDate()}</div>
+            <div
+              key={i}
+              className={`h-24 p-1 rounded-lg border ${
+                inM
+                  ? isHoliday
+                    ? "bg-red-50 border-red-200"
+                    : isWeekend
+                      ? "bg-slate-100 border-slate-200"
+                      : "bg-slate-50 border-slate-200"
+                  : "bg-slate-100 border-slate-100 opacity-60"
+              }`}
+              title={isHoliday ? (lang === "en" ? "Closed (FR Holiday)" : "Chiuso (Festività FR)") : undefined}
+            >
+              <div className={`text-[11px] text-right ${isHoliday ? "text-red-600 font-semibold" : "text-slate-500"}`}>{d.getDate()}</div>
               <div className="mt-1 flex flex-col gap-1 overflow-hidden">
                 {te.map((ev) => (
-                  <span key={ev.id} className="text-[10px] px-1 rounded bg-emerald-200 text-emerald-900 truncate" title={`${ev.t} (${ev.id})`}>
-                    {ev.t} ({ev.id})
+                  <span key={ev.id} className="text-xs px-1 rounded bg-emerald-200 text-emerald-900 truncate" title={`${ev.id} — ${ev.t}`}>
+                    <span className="font-medium">{ev.id}</span> — <strong>{ev.t}</strong>
                   </span>
                 ))}
                 {be.map((ev) => (
-                  <span key={ev.id} className="text-[10px] px-1 rounded bg-amber-200 text-amber-900 truncate" title={`${ev.t}`}>
+                  <span key={ev.id} className="text-xs px-1 rounded bg-amber-200 text-amber-900 truncate" title={`${ev.t}`}>
                     {ev.t}
                   </span>
                 ))}
@@ -909,18 +894,13 @@ function Cal({ lang, role, m, setM, tests, blocks, addBlock }) {
           );
         })}
       </div>
+
       {(role === "Admin" || role === "SuperAdmin") && (
         <div className="mt-3 flex flex-wrap items-center gap-2">
           <span className="text-sm font-semibold">{t.cal.nb}:</span>
-          <button onClick={() => addBlock("m")} className="px-3 py-1 rounded-lg bg-amber-200">
-            {t.cal.types.m}
-          </button>
-          <button onClick={() => addBlock("b")} className="px-3 py-1 rounded-lg bg-red-200">
-            {t.cal.types.b}
-          </button>
-          <button onClick={() => addBlock("l")} className="px-3 py-1 rounded-lg bg-blue-200">
-            {t.cal.types.l}
-          </button>
+          <button onClick={() => addBlock("m")} className="px-3 py-1 rounded-lg bg-amber-200">{t.cal.types.m}</button>
+          <button onClick={() => addBlock("b")} className="px-3 py-1 rounded-lg bg-red-200">{t.cal.types.b}</button>
+          <button onClick={() => addBlock("l")} className="px-3 py-1 rounded-lg bg-blue-200">{t.cal.types.l}</button>
         </div>
       )}
     </div>
@@ -936,11 +916,7 @@ function Spot({ lang, open, setOpen, step, setStep }) {
     setT(el ? el.getBoundingClientRect() : null);
   }, [open, step, lang]);
   if (!open) return null;
-  const pad = 12,
-    rx = target ? target.left + window.scrollX - pad : 0,
-    ry = target ? target.top + window.scrollY - pad : 0,
-    rw = target ? target.width + pad * 2 : 0,
-    rh = target ? target.height + pad * 2 : 0;
+  const pad = 12, rx = target ? target.left + window.scrollX - pad : 0, ry = target ? target.top + window.scrollY - pad : 0, rw = target ? target.width + pad * 2 : 0, rh = target ? target.height + pad * 2 : 0;
   return (
     <AnimatePresence>
       <motion.div className="fixed inset-0 z-50" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
@@ -958,13 +934,9 @@ function Spot({ lang, open, setOpen, step, setStep }) {
             <div className="font-semibold mb-1">{s[step]?.t}</div>
             <div className="text-sm text-slate-600 mb-3">{s[step]?.b}</div>
             <div className="flex justify-between gap-2">
-              <button onClick={() => setOpen(false)} className="px-3 py-2 rounded-xl bg-slate-100">
-                {T[lang].tour.skip}
-              </button>
+              <button onClick={() => setOpen(false)} className="px-3 py-2 rounded-xl bg-slate-100">{T[lang].tour.skip}</button>
               <div className="flex gap-2">
-                <button onClick={() => setStep(Math.max(0, step - 1))} className="px-3 py-2 rounded-xl bg-slate-100">
-                  {T[lang].tour.back}
-                </button>
+                <button onClick={() => setStep(Math.max(0, step - 1))} className="px-3 py-2 rounded-xl bg-slate-100">{T[lang].tour.back}</button>
                 <button onClick={() => (step < s.length - 1 ? setStep(step + 1) : setOpen(false))} className="px-3 py-2 rounded-xl bg-slate-900 text-white">
                   {step < s.length - 1 ? T[lang].tour.next : T[lang].tour.done}
                 </button>
