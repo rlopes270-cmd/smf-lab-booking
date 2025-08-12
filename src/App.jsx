@@ -366,13 +366,21 @@ export default function App() {
     setTests((p) => p.map((t) => (t.id === id ? { ...t, ar: false, st: "Ongoing" } : t)));
   }
   function addBlock(tp) {
-    if (role !== "Admin" && role !== "SuperAdmin")) return;
-    const title = prompt(`${t.cal.type}: ${tp}`) || tp;
-    const s = prompt("Start (YYYY-MM-DD)", fmt(add(new Date(), 3)));
-    const e = prompt("End (YYYY-MM-DD)", fmt(add(new Date(), 3)));
-    if (!s || !e) return;
-    setBlocks((p) => p.concat({ id: "B-" + (p.length + 1), t: tp, title, s: parseYMD(s), e: parseYMD(e) }));
-  }
+  if (role !== "Admin" && role !== "SuperAdmin") return; // ← tolta la parentesi in più
+  const title = prompt(`${t.cal.type}: ${tp}`) || tp;
+  const s = prompt("Start (YYYY-MM-DD)", fmt(add(new Date(), 3)));
+  const e = prompt("End (YYYY-MM-DD)", fmt(add(new Date(), 3)));
+  if (!s || !e) return;
+  setBlocks((p) =>
+    p.concat({
+      id: "B-" + (p.length + 1),
+      t: tp,
+      title,
+      s: parseYMD(s),
+      e: parseYMD(e),
+    })
+  );
+}
 
   return (
     <div className="min-h-screen p-4 md:p-6 bg-slate-50">
