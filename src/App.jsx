@@ -8,7 +8,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { getFrenchHolidaySet } from "./utils/holidaysFR.js";
-import { parseYMD, fmtISO } from "./utils/dateSafe";
+import { parseYMD, fmtISO } from "./utils/dateSafe.js";
 
 // ---------- UI color helpers ----------
 const C = {
